@@ -1,3 +1,5 @@
+npm install -g component coffeescript
+
 jsedn
 =====
 

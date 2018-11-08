@@ -1,33 +1,108 @@
+
 ;(function(){
+
 /**
- * Require the given path.
+ * Require the module at `name`.
  *
- * @param {String} path
+ * @param {String} name
  * @return {Object} exports
  * @api public
  */
 
-function require(p, parent, orig){
-  var path = require.resolve(p)
-    , mod = require.modules[path];
+function require(name) {
+  var module = require.modules[name];
+  if (!module) throw new Error('failed to require "' + name + '"');
 
-  // lookup failed
-  if (null == path) {
-    orig = orig || p;
-    parent = parent || 'root';
-    throw new Error('failed to require "' + orig + '" from "' + parent + '"');
+  if (!('exports' in module) && typeof module.definition === 'function') {
+    module.client = module.component = true;
+    module.definition.call(this, module.exports = {}, module);
+    delete module.definition;
   }
 
-  // perform real require()
-  // by invoking the module's
-  // registered function
-  if (!mod.exports) {
-    mod.exports = {};
-    mod.client = mod.component = true;
-    mod.call(this, mod, mod.exports, require.relative(path));
-  }
+  return module.exports;
+}
 
-  return mod.exports;
+/**
+ * Meta info, accessible in the global scope unless you use AMD option.
+ */
+
+require.loader = 'component';
+
+/**
+ * Internal helper object, contains a sorting function for semantiv versioning
+ */
+require.helper = {};
+require.helper.semVerSort = function(a, b) {
+  var aArray = a.version.split('.');
+  var bArray = b.version.split('.');
+  for (var i=0; i<aArray.length; ++i) {
+    var aInt = parseInt(aArray[i], 10);
+    var bInt = parseInt(bArray[i], 10);
+    if (aInt === bInt) {
+      var aLex = aArray[i].substr((""+aInt).length);
+      var bLex = bArray[i].substr((""+bInt).length);
+      if (aLex === '' && bLex !== '') return 1;
+      if (aLex !== '' && bLex === '') return -1;
+      if (aLex !== '' && bLex !== '') return aLex > bLex ? 1 : -1;
+      continue;
+    } else if (aInt > bInt) {
+      return 1;
+    } else {
+      return -1;
+    }
+  }
+  return 0;
+}
+
+/**
+ * Find and require a module which name starts with the provided name.
+ * If multiple modules exists, the highest semver is used. 
+ * This function can only be used for remote dependencies.
+
+ * @param {String} name - module name: `user~repo`
+ * @param {Boolean} returnPath - returns the canonical require path if true, 
+ *                               otherwise it returns the epxorted module
+ */
+require.latest = function (name, returnPath) {
+  function showError(name) {
+    throw new Error('failed to find latest module of "' + name + '"');
+  }
+  // only remotes with semvers, ignore local files conataining a '/'
+  var versionRegexp = /(.*)~(.*)@v?(\d+\.\d+\.\d+[^\/]*)$/;
+  var remoteRegexp = /(.*)~(.*)/;
+  if (!remoteRegexp.test(name)) showError(name);
+  var moduleNames = Object.keys(require.modules);
+  var semVerCandidates = [];
+  var otherCandidates = []; // for instance: name of the git branch
+  for (var i=0; i<moduleNames.length; i++) {
+    var moduleName = moduleNames[i];
+    if (new RegExp(name + '@').test(moduleName)) {
+        var version = moduleName.substr(name.length+1);
+        var semVerMatch = versionRegexp.exec(moduleName);
+        if (semVerMatch != null) {
+          semVerCandidates.push({version: version, name: moduleName});
+        } else {
+          otherCandidates.push({version: version, name: moduleName});
+        } 
+    }
+  }
+  if (semVerCandidates.concat(otherCandidates).length === 0) {
+    showError(name);
+  }
+  if (semVerCandidates.length > 0) {
+    var module = semVerCandidates.sort(require.helper.semVerSort).pop().name;
+    if (returnPath === true) {
+      return module;
+    }
+    return require(module);
+  }
+  // if the build contains more than one branch of the same module
+  // you should not use this funciton
+  var module = otherCandidates.sort(function(a, b) {return a.name > b.name})[0].name;
+  if (returnPath === true) {
+    return module;
+  }
+  return require(module);
 }
 
 /**
@@ -37,161 +112,37 @@ function require(p, parent, orig){
 require.modules = {};
 
 /**
- * Registered aliases.
- */
-
-require.aliases = {};
-
-/**
- * Resolve `path`.
+ * Register module at `name` with callback `definition`.
  *
- * Lookup:
- *
- *   - PATH/index.js
- *   - PATH.js
- *   - PATH
- *
- * @param {String} path
- * @return {String} path or null
+ * @param {String} name
+ * @param {Function} definition
  * @api private
  */
 
-require.resolve = function(path){
-  var orig = path
-    , reg = path + '.js'
-    , regJSON = path + '.json'
-    , index = path + '/index.js'
-    , indexJSON = path + '/index.json';
-
-  return require.modules[reg] && reg
-    || require.modules[regJSON] && regJSON
-    || require.modules[index] && index
-    || require.modules[indexJSON] && indexJSON
-    || require.modules[orig] && orig
-    || require.aliases[index];
-};
-
-/**
- * Normalize `path` relative to the current path.
- *
- * @param {String} curr
- * @param {String} path
- * @return {String}
- * @api private
- */
-
-require.normalize = function(curr, path) {
-  var segs = [];
-
-  if ('.' != path.charAt(0)) return path;
-
-  curr = curr.split('/');
-  path = path.split('/');
-
-  for (var i = 0; i < path.length; ++i) {
-    if ('..' == path[i]) {
-      curr.pop();
-    } else if ('.' != path[i] && '' != path[i]) {
-      segs.push(path[i]);
-    }
-  }
-
-  return curr.concat(segs).join('/');
-};
-
-/**
- * Register module at `path` with callback `fn`.
- *
- * @param {String} path
- * @param {Function} fn
- * @api private
- */
-
-require.register = function(path, fn){
-  require.modules[path] = fn;
-};
-
-/**
- * Alias a module definition.
- *
- * @param {String} from
- * @param {String} to
- * @api private
- */
-
-require.alias = function(from, to){
-  var fn = require.modules[from];
-  if (!fn) throw new Error('failed to alias "' + from + '", it does not exist');
-  require.aliases[to] = from;
-};
-
-/**
- * Return a require function relative to the `parent` path.
- *
- * @param {String} parent
- * @return {Function}
- * @api private
- */
-
-require.relative = function(parent) {
-  var p = require.normalize(parent, '..');
-
-  /**
-   * lastIndexOf helper.
-   */
-
-  function lastIndexOf(arr, obj){
-    var i = arr.length;
-    while (i--) {
-      if (arr[i] === obj) return i;
-    }
-    return -1;
-  }
-
-  /**
-   * The relative require() itself.
-   */
-
-  function fn(path){
-    var orig = path;
-    path = fn.resolve(path);
-    return require(path, parent, orig);
-  }
-
-  /**
-   * Resolve relative to the parent.
-   */
-
-  fn.resolve = function(path){
-    // resolve deps by returning
-    // the dep in the nearest "deps"
-    // directory
-    if ('.' != path.charAt(0)) {
-      var segs = parent.split('/');
-      var i = lastIndexOf(segs, 'deps') + 1;
-      if (!i) i = 0;
-      path = segs.slice(0, i + 1).join('/') + '/deps/' + path;
-      return path;
-    }
-    return require.normalize(p, path);
+require.register = function (name, definition) {
+  require.modules[name] = {
+    definition: definition
   };
-
-  /**
-   * Check if module is defined at `path`.
-   */
-
-  fn.exists = function(path){
-    return !! require.modules[fn.resolve(path)];
-  };
-
-  return fn;
-};require.register("jkroso-type/index.js", function(module, exports, require){
+};
 
 /**
- * refs
+ * Define a module's exports immediately with `exports`.
+ *
+ * @param {String} name
+ * @param {Generic} exports
+ * @api private
  */
 
-var toString = Object.prototype.toString;
+require.define = function (name, exports) {
+  require.modules[name] = {
+    exports: exports
+  };
+};
+require.register("jkroso~type@2.0.0", function (exports, module) {
+const toString = {}.toString
+const DomNode = typeof window != 'undefined'
+  ? window.Node
+  : Function // could be any function
 
 /**
  * Return the type of `val`.
@@ -201,179 +152,181 @@ var toString = Object.prototype.toString;
  * @api public
  */
 
-module.exports = function(v){
-  // .toString() is slow so try avoid it
-  return typeof v === 'object'
-    ? types[toString.call(v)]
-    : typeof v
-};
+function type(x) {
+  var type = typeof x
+  if (type != 'object') return type
+  type = types[toString.call(x)]
+  if (type == 'object') {
+    // in case they have been polyfilled
+    if (x instanceof Map) return 'map'
+    if (x instanceof Set) return 'set'
+    return 'object'
+  }
+  if (type) return type
+  if (x instanceof DomNode) switch (x.nodeType) {
+    case 1:  return 'element'
+    case 3:  return 'text-node'
+    case 9:  return 'document'
+    case 11: return 'document-fragment'
+    default: return 'dom-node'
+  }
+}
 
-var types = {
+const types = module.exports.types = {
   '[object Function]': 'function',
   '[object Date]': 'date',
   '[object RegExp]': 'regexp',
   '[object Arguments]': 'arguments',
   '[object Array]': 'array',
+  '[object Set]': 'set',
   '[object String]': 'string',
   '[object Null]': 'null',
   '[object Undefined]': 'undefined',
   '[object Number]': 'number',
   '[object Boolean]': 'boolean',
   '[object Object]': 'object',
-  '[object Text]': 'textnode',
-  '[object Uint8Array]': '8bit-array',
-  '[object Uint16Array]': '16bit-array',
-  '[object Uint32Array]': '32bit-array',
-  '[object Uint8ClampedArray]': '8bit-array',
-  '[object Error]': 'error'
+  '[object Map]': 'map',
+  '[object Text]': 'text-node',
+  '[object Uint8Array]': 'bit-array',
+  '[object Uint16Array]': 'bit-array',
+  '[object Uint32Array]': 'bit-array',
+  '[object Uint8ClampedArray]': 'bit-array',
+  '[object Error]': 'error',
+  '[object FormData]': 'form-data',
+  '[object File]': 'file',
+  '[object Blob]': 'blob'
 }
 
-if (typeof window != 'undefined') {
-  for (var el in window) if (/^HTML\w+Element$/.test(el)) {
-    types['[object '+el+']'] = 'element'
-  }
-}
-
-module.exports.types = types
+module.exports = type
 
 });
-require.register("jkroso-equals/index.js", function(module, exports, require){
 
-var type = require('type')
+require.register("jkroso~equals@2.0.0", function (exports, module) {
+var type = require('@jkroso/type');
 
-/**
- * assert all values are equal
- *
- * @param {Any} [...]
- * @return {Boolean}
- */
 
-module.exports = function(){
-	var i = arguments.length - 1
-	while (i > 0) {
-		if (!compare(arguments[i], arguments[--i])) return false
-	}
-	return true
+function equal(a, b, memos){
+  // All identical values are equivalent
+  if (a === b) return true
+  const fnA = types[type(a)]
+  const fnB = types[type(b)]
+  return fnA && fnA === fnB
+    ? fnA(a, b, memos)
+    : false
 }
 
-// (any, any, [array]) -> boolean
-function compare(a, b, memos){
-	// All identical values are equivalent
-	if (a === b) return true
-	var fnA = types[type(a)]
-	if (fnA !== types[type(b)]) return false
-	return fnA ? fnA(a, b, memos) : false
-}
-
-var types = {}
+const types = {}
 
 // (Number) -> boolean
-types.number = function(a){
-	// NaN check
-	return a !== a
+types.number = function(a, b){
+  return a !== a && b !== b/*Nan check*/
 }
 
 // (function, function, array) -> boolean
 types['function'] = function(a, b, memos){
-	return a.toString() === b.toString()
-		// Functions can act as objects
-	  && types.object(a, b, memos) 
-		&& compare(a.prototype, b.prototype)
+  return a.toString() === b.toString()
+    // Functions can act as objects
+    && types.object(a, b, memos)
+    && equal(a.prototype, b.prototype)
 }
 
 // (date, date) -> boolean
 types.date = function(a, b){
-	return +a === +b
+  return +a === +b
 }
 
 // (regexp, regexp) -> boolean
 types.regexp = function(a, b){
-	return a.toString() === b.toString()
+  return a.toString() === b.toString()
 }
 
 // (DOMElement, DOMElement) -> boolean
 types.element = function(a, b){
-	return a.outerHTML === b.outerHTML
+  return a.outerHTML === b.outerHTML
 }
 
 // (textnode, textnode) -> boolean
 types.textnode = function(a, b){
-	return a.textContent === b.textContent
+  return a.textContent === b.textContent
 }
 
 // decorate `fn` to prevent it re-checking objects
 // (function) -> function
 function memoGaurd(fn){
-	return function(a, b, memos){
-		if (!memos) return fn(a, b, [])
-		var i = memos.length, memo
-		while (memo = memos[--i]) {
-			if (memo[0] === a && memo[1] === b) return true
-		}
-		return fn(a, b, memos)
-	}
+  return function(a, b, memos){
+    if (!memos) return fn(a, b, [])
+    var i = memos.length, memo
+    while (memo = memos[--i]) {
+      if (memo[0] === a && memo[1] === b) return true
+    }
+    return fn(a, b, memos)
+  }
 }
 
 types['arguments'] =
-types.array = memoGaurd(compareArrays)
+types['bit-array'] =
+types.array = memoGaurd(arrayEqual)
 
 // (array, array, array) -> boolean
-function compareArrays(a, b, memos){
-	var i = a.length
-	if (i !== b.length) return false
-	memos.push([a, b])
-	while (i--) {
-		if (!compare(a[i], b[i], memos)) return false
-	}
-	return true
+function arrayEqual(a, b, memos){
+  var i = a.length
+  if (i !== b.length) return false
+  memos.push([a, b])
+  while (i--) {
+    if (!equal(a[i], b[i], memos)) return false
+  }
+  return true
 }
 
-types.object = memoGaurd(compareObjects)
+types.object = memoGaurd(objectEqual)
 
 // (object, object, array) -> boolean
-function compareObjects(a, b, memos) {
-	var ka = getEnumerableProperties(a)
-	var kb = getEnumerableProperties(b)
-	var i = ka.length
+function objectEqual(a, b, memos) {
+  if (typeof a.equal == 'function') {
+    memos.push([a, b])
+    return a.equal(b, memos)
+  }
+  var ka = getEnumerableProperties(a)
+  var kb = getEnumerableProperties(b)
+  var i = ka.length
 
-	// same number of properties
-	if (i !== kb.length) return false
+  // same number of properties
+  if (i !== kb.length) return false
 
-	// although not necessarily the same order
-	ka.sort()
-	kb.sort()
+  // although not necessarily the same order
+  ka.sort()
+  kb.sort()
 
-	// cheap key test
-	while (i--) if (ka[i] !== kb[i]) return false
+  // cheap key test
+  while (i--) if (ka[i] !== kb[i]) return false
 
-	// remember
-	memos.push([a, b])
+  // remember
+  memos.push([a, b])
 
-	// iterate again this time doing a thorough check
-	i = ka.length
-	while (i--) {
-		var key = ka[i]
-		if (!compare(a[key], b[key], memos)) return false
-	}
+  // iterate again this time doing a thorough check
+  i = ka.length
+  while (i--) {
+    var key = ka[i]
+    if (!equal(a[key], b[key], memos)) return false
+  }
 
-	return true
+  return true
 }
 
 // (object) -> array
-function getEnumerableProperties (object) {
-	var result = []
-	for (var k in object) if (k !== 'constructor') {
-		result.push(k)
-	}
-	return result
+const getEnumerableProperties = (object) => {
+  const result = []
+  for (var k in object) if (k !== 'constructor') {
+    result.push(k)
+  }
+  return result
 }
 
-// expose compare
-module.exports.compare = compare
+module.exports = equal
 
 });
-require.register("component-type/index.js", function(module, exports, require){
 
+require.register("component~type@v1.2.1", function (exports, module) {
 /**
  * toString ref.
  */
@@ -390,27 +343,44 @@ var toString = Object.prototype.toString;
 
 module.exports = function(val){
   switch (toString.call(val)) {
-    case '[object Function]': return 'function';
     case '[object Date]': return 'date';
     case '[object RegExp]': return 'regexp';
     case '[object Arguments]': return 'arguments';
     case '[object Array]': return 'array';
-    case '[object String]': return 'string';
+    case '[object Error]': return 'error';
   }
 
   if (val === null) return 'null';
   if (val === undefined) return 'undefined';
+  if (val !== val) return 'nan';
   if (val && val.nodeType === 1) return 'element';
-  if (val === Object(val)) return 'object';
+
+  if (isBuffer(val)) return 'buffer';
+
+  val = val.valueOf
+    ? val.valueOf()
+    : Object.prototype.valueOf.apply(val);
 
   return typeof val;
 };
 
+// code borrowed from https://github.com/feross/is-buffer/blob/master/index.js
+function isBuffer(obj) {
+  return !!(obj != null &&
+    (obj._isBuffer || // For Safari 5-7 (missing Object.prototype.constructor)
+      (obj.constructor &&
+      typeof obj.constructor.isBuffer === 'function' &&
+      obj.constructor.isBuffer(obj))
+    ))
+}
+
 });
-require.register("jsedn/index.js", function(module, exports, require){
-module.exports = require("./lib/reader.js");
+
+require.register("jsedn", function (exports, module) {
+module.exports = require("jsedn/lib/reader.js");
 });
-require.register("jsedn/lib/atoms.js", function(module, exports, require){
+
+require.register("jsedn/lib/atoms.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var BigInt, Char, Discard, Keyword, Prim, StringObj, Symbol, bigInt, char, charMap, kw, memo, sym, type,
@@ -419,9 +389,9 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
     __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; },
     __slice = [].slice;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  memo = require("./memo");
+  memo = require("jsedn/lib/memo.js");
 
   Prim = (function() {
 
@@ -692,12 +662,13 @@ require.register("jsedn/lib/atoms.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/atPath.js", function(module, exports, require){
+
+require.register("jsedn/lib/atPath.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var kw;
 
-  kw = require("./atoms").kw;
+  kw = require("jsedn/lib/atoms.js").kw;
 
   module.exports = function(obj, path) {
     var part, value, _i, _len;
@@ -724,7 +695,8 @@ require.register("jsedn/lib/atPath.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/collections.js", function(module, exports, require){
+
+require.register("jsedn/lib/collections.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var Iterable, List, Map, Pair, Prim, Set, Vector, encode, equals, type,
@@ -732,13 +704,13 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
     __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; },
     __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  equals = require("equals");
+  equals = require("jkroso~equals@2.0.0");
 
-  Prim = require("./atoms").Prim;
+  Prim = require("jsedn/lib/atoms.js").Prim;
 
-  encode = require("./encode").encode;
+  encode = require("jsedn/lib/encode.js").encode;
 
   Iterable = (function(_super) {
 
@@ -1090,7 +1062,8 @@ require.register("jsedn/lib/collections.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/compile.js", function(module, exports, require){
+
+require.register("jsedn/lib/compile.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
 
@@ -1101,14 +1074,15 @@ require.register("jsedn/lib/compile.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/encode.js", function(module, exports, require){
+
+require.register("jsedn/lib/encode.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var encode, encodeHandlers, encodeJson, tokenHandlers, type;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  tokenHandlers = require("./tokens").tokenHandlers;
+  tokenHandlers = require("jsedn/lib/tokens.js").tokenHandlers;
 
   encodeHandlers = {
     array: {
@@ -1149,7 +1123,7 @@ require.register("jsedn/lib/encode.js", function(module, exports, require){
         return type(obj) === "string";
       },
       action: function(obj) {
-        return "\"" + (obj.toString().replace(/"/g, '\\"')) + "\"";
+        return "\"" + (obj.toString().replace(/"|\\/g, '\\$&')) + "\"";
       }
     },
     boolean: {
@@ -1231,7 +1205,8 @@ require.register("jsedn/lib/encode.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/memo.js", function(module, exports, require){
+
+require.register("jsedn/lib/memo.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var memo;
@@ -1249,23 +1224,24 @@ require.register("jsedn/lib/memo.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/reader.js", function(module, exports, require){
+
+require.register("jsedn/lib/reader.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var BigInt, Char, Discard, Iterable, Keyword, List, Map, Pair, Prim, Set, StringObj, Symbol, Tag, Tagged, Vector, bigInt, char, encode, encodeHandlers, encodeJson, escapeChar, fs, handleToken, kw, lex, parenTypes, parens, parse, read, specialChars, sym, tagActions, tokenHandlers, type, typeClasses, _ref, _ref1, _ref2, _ref3, _ref4,
     __indexOf = [].indexOf || function(item) { for (var i = 0, l = this.length; i < l; i++) { if (i in this && this[i] === item) return i; } return -1; };
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  _ref = require("./atoms"), Prim = _ref.Prim, Symbol = _ref.Symbol, Keyword = _ref.Keyword, StringObj = _ref.StringObj, Char = _ref.Char, Discard = _ref.Discard, BigInt = _ref.BigInt, char = _ref.char, kw = _ref.kw, sym = _ref.sym, bigInt = _ref.bigInt;
+  _ref = require("jsedn/lib/atoms.js"), Prim = _ref.Prim, Symbol = _ref.Symbol, Keyword = _ref.Keyword, StringObj = _ref.StringObj, Char = _ref.Char, Discard = _ref.Discard, BigInt = _ref.BigInt, char = _ref.char, kw = _ref.kw, sym = _ref.sym, bigInt = _ref.bigInt;
 
-  _ref1 = require("./collections"), Iterable = _ref1.Iterable, List = _ref1.List, Vector = _ref1.Vector, Set = _ref1.Set, Pair = _ref1.Pair, Map = _ref1.Map;
+  _ref1 = require("jsedn/lib/collections.js"), Iterable = _ref1.Iterable, List = _ref1.List, Vector = _ref1.Vector, Set = _ref1.Set, Pair = _ref1.Pair, Map = _ref1.Map;
 
-  _ref2 = require("./tags"), Tag = _ref2.Tag, Tagged = _ref2.Tagged, tagActions = _ref2.tagActions;
+  _ref2 = require("jsedn/lib/tags.js"), Tag = _ref2.Tag, Tagged = _ref2.Tagged, tagActions = _ref2.tagActions;
 
-  _ref3 = require("./encode"), encodeHandlers = _ref3.encodeHandlers, encode = _ref3.encode, encodeJson = _ref3.encodeJson;
+  _ref3 = require("jsedn/lib/encode.js"), encodeHandlers = _ref3.encodeHandlers, encode = _ref3.encode, encodeJson = _ref3.encodeJson;
 
-  _ref4 = require("./tokens"), handleToken = _ref4.handleToken, tokenHandlers = _ref4.tokenHandlers;
+  _ref4 = require("jsedn/lib/tokens.js"), handleToken = _ref4.handleToken, tokenHandlers = _ref4.tokenHandlers;
 
   typeClasses = {
     Map: Map,
@@ -1518,9 +1494,9 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
         return obj;
       }
     },
-    atPath: require("./atPath"),
-    unify: require("./unify")(parse),
-    compile: require("./compile")
+    atPath: require("jsedn/lib/atPath.js"),
+    unify: require("jsedn/lib/unify.js")(parse),
+    compile: require("jsedn/lib/compile.js")
   };
 
   if (typeof window === "undefined") {
@@ -1541,7 +1517,8 @@ require.register("jsedn/lib/reader.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/tags.js", function(module, exports, require){
+
+require.register("jsedn/lib/tags.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var Prim, Tag, Tagged, tagActions, type,
@@ -1549,9 +1526,9 @@ require.register("jsedn/lib/tags.js", function(module, exports, require){
     __hasProp = {}.hasOwnProperty,
     __extends = function(child, parent) { for (var key in parent) { if (__hasProp.call(parent, key)) child[key] = parent[key]; } function ctor() { this.constructor = child; } ctor.prototype = parent.prototype; child.prototype = new ctor(); child.__super__ = parent.prototype; return child; };
 
-  Prim = require("./atoms").Prim;
+  Prim = require("jsedn/lib/atoms.js").Prim;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
   Tag = (function() {
 
@@ -1594,7 +1571,7 @@ require.register("jsedn/lib/tags.js", function(module, exports, require){
     };
 
     Tagged.prototype.ednEncode = function() {
-      return "\#" + (this.tag().dn()) + " " + (require("./encode").encode(this.obj()));
+      return "\#" + (this.tag().dn()) + " " + (require("jsedn/lib/encode.js").encode(this.obj()));
     };
 
     Tagged.prototype.jsonEncode = function() {
@@ -1643,14 +1620,15 @@ require.register("jsedn/lib/tags.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/tokens.js", function(module, exports, require){
+
+require.register("jsedn/lib/tokens.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var Char, StringObj, Tag, bigInt, char, handleToken, kw, sym, tokenHandlers, _ref;
 
-  _ref = require("./atoms"), Char = _ref.Char, StringObj = _ref.StringObj, char = _ref.char, kw = _ref.kw, sym = _ref.sym, bigInt = _ref.bigInt;
+  _ref = require("jsedn/lib/atoms.js"), Char = _ref.Char, StringObj = _ref.StringObj, char = _ref.char, kw = _ref.kw, sym = _ref.sym, bigInt = _ref.bigInt;
 
-  Tag = require("./tags").Tag;
+  Tag = require("jsedn/lib/tags.js").Tag;
 
   handleToken = function(token) {
     var handler, name;
@@ -1722,25 +1700,25 @@ require.register("jsedn/lib/tokens.js", function(module, exports, require){
 }).call(this);
 
 });
-require.register("jsedn/lib/type.js", function(module, exports, require){
+
+require.register("jsedn/lib/type.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
-
-  module.exports = typeof window === "undefined" ? require("type-component") : require("type");
-
+  module.exports = typeof module !== "undefined" && this.module !== module ? require("type-component") : require("component~type@v1.2.1");
 }).call(this);
 
 });
-require.register("jsedn/lib/unify.js", function(module, exports, require){
+
+require.register("jsedn/lib/unify.js", function (exports, module) {
 // Generated by CoffeeScript 1.6.1
 (function() {
   var Map, Pair, Symbol, kw, sym, type, _ref, _ref1;
 
-  type = require("./type");
+  type = require("jsedn/lib/type.js");
 
-  _ref = require("./collections"), Map = _ref.Map, Pair = _ref.Pair;
+  _ref = require("jsedn/lib/collections.js"), Map = _ref.Map, Pair = _ref.Pair;
 
-  _ref1 = require("./atoms"), Symbol = _ref1.Symbol, kw = _ref1.kw, sym = _ref1.sym;
+  _ref1 = require("jsedn/lib/atoms.js"), Symbol = _ref1.Symbol, kw = _ref1.kw, sym = _ref1.sym;
 
   module.exports = function(parse) {
     return function(data, values, tokenStart) {
@@ -1788,13 +1766,12 @@ require.register("jsedn/lib/unify.js", function(module, exports, require){
 }).call(this);
 
 });
-require.alias("jkroso-equals/index.js", "jsedn/deps/equals/index.js");
-require.alias("jkroso-type/index.js", "jkroso-equals/deps/type/index.js");
 
-require.alias("component-type/index.js", "jsedn/deps/type/index.js");
-  if ("undefined" == typeof module) {
-    window.jsedn = require("jsedn");
-  } else {
-    module.exports = require("jsedn");
-  }
-})();
+if (typeof exports == "object") {
+  module.exports = require("jsedn");
+} else if (typeof define == "function" && define.amd) {
+  define("jsedn", [], function(){ return require("jsedn"); });
+} else {
+  (this || window)["jsedn"] = require("jsedn");
+}
+})()
